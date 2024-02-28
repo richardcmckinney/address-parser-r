@@ -2,20 +2,27 @@ library(dplyr)
 library(readr)
 library(stringr)
 
-# RECREATE CORRECT EPC ADDRESS ------------------------------------------------- 
-if (clean_addresses_epc == 1) {
-  # Efficient file path creation and data reading
-  file_count <- length(list.files("cleaned/epcs", full.names = TRUE))
-  epc_file_path <- sprintf("cleaned/epc_addresses_%d.csv", file_count)
-  epcs <- read_csv(epc_file_path, show_col_types = FALSE)
-  
-  # Optimized address splitting with separate and string operations
-  epcs <- epcs %>%
-    mutate(ADDRESS = str_trim(ADDRESS)) %>%
-    separate(ADDRESS, into = c("PRIMARY", "STREET", "SECONDARY", "TERTIARY"), 
-             sep = ",\\s*", remove = FALSE, extra = "merge") %>%
+# ------------------ Helper Functions ---------------------
+
+# Cleans a single address string by trimming, removing special characters, and converting to uppercase
+clean_address <- function(address) {
+  address %>%
+    str_trim() %>% # Remove leading and trailing whitespace
+    str_remove_all("\\.") %>% # Remove periods
+    str_to_upper() # Convert to uppercase
+}
+
+# Corrects address fields within a dataframe
+correct_address <- function(df) {
+  df %>%
+    mutate(ADDRESS = clean_address(ADDRESS)) %>%
+    # Split address into components. The 'extra' argument is set to 'merge' to combine all extra pieces into the last component
+    separate(ADDRESS, sep = ",\\s*", into = c("PRIMARY", "STREET", "SECONDARY", "TERTIARY"), 
+             remove = FALSE, extra = "merge") %>%
+    # Further separate the PRIMARY field to identify different parts of the address. This is particularly useful for complex addresses
     separate(PRIMARY, into = c("PRIMARY_1", "PRIMARY_2", "PRIMARY_3", "PRIMARY_4"), 
              sep = "\\s+", remove = FALSE, extra = "merge") %>%
+    # Apply row-wise operations to restructure the address based on certain conditions
     rowwise() %>%
     mutate(
       PRIMARY = case_when(
@@ -32,47 +39,54 @@ if (clean_addresses_epc == 1) {
       )
     ) %>%
     ungroup() %>%
+    # Remove the temporary columns used for address restructuring
     select(-c(PRIMARY_1, PRIMARY_2, PRIMARY_3, PRIMARY_4)) %>%
-    mutate(across(c(PRIMARY, STREET, SECONDARY, TERTIARY), toupper)) %>%
-    mutate(STREET = str_replace_all(STREET, "\\.", "")) %>%
+    # Apply the clean_address function to all address-related fields
+    mutate(across(c(PRIMARY, STREET, SECONDARY, TERTIARY), clean_address)) %>%
+    # Sort the data by postcode and then by primary and secondary address components for consistency
     arrange(POSTCODE, PRIMARY, SECONDARY)
-  
-  # Output the cleaned data
-  output_file_path <- sprintf("cleaned/epc_addresses_%dc.csv", file_count - 1)
-  write_csv(epcs, output_file_path)
 }
 
-# MATCH REGISTRY AND EPC ADDRESSES ---------------------------------------------
-if (match_addresses == 1) {
-  read_only <- 1
-  merges_count <- 0
-  
-  # Loading data
-  reg_file_path <- sprintf("cleaned/reg_addresses_%s.csv", registry_files)
-  epc_file_path <- "cleaned/epc_addresses_345.csv"
-  
-  reg_addresses <- read_csv(reg_file_path, show_col_types = FALSE)
-  epc_addresses <- read_csv(epc_file_path, show_col_types = FALSE)
-  
-  # Define a function to perform merge and update operations
-  perform_merge <- function(reg, epc, merge_fields, merges_count) {
-    merge_result <- merge(reg, epc, by = merge_fields)
-    if (read_only == 0) {
-      output_file_path <- sprintf("cleaned/addresses/merged_addresses_%d.csv", merges_count + 1)
-      write_csv(merge_result, output_file_path)
-    }
-    return(list(merge_result = merge_result, merges_count = merges_count + 1))
+# Merges two datasets and writes the output to a file if an output prefix is provided
+perform_merge <- function(reg_data, epc_data, merge_fields, output_prefix = NULL) {
+  merge_result <- full_join(reg_data, epc_data, by = merge_fields)
+  # Write the merged result to a file if an output path is provided
+  if (!is.null(output_prefix)) {
+    output_file_path <- sprintf("%s_%d.csv", output_prefix, nrow(merge_result))
+    write_csv(merge_result, output_file_path)
   }
-  
-  # Example of using the perform_merge function
-  merge_result <- perform_merge(reg_addresses, epc_addresses, c("PRIMARY", "SECONDARY", "STREET", "POSTCODE"), merges_count)
-  exact <- merge_result$merge_result
-  merges_count <- merge_result$merges_count
-  
-  # Further merge operations can follow the same pattern
-  # Update epc_addresses and reg_addresses based on merge results as needed
-  
-  # Cleanup and final operations
-  rm(exact) # Example of memory cleanup
-  print(sprintf("%d merge operations completed", merges_count))
+  merge_result
+}
+
+# ------------------ Main Execution ---------------------
+
+# Check if 'clean_addresses_epc' flag is set to proceed with cleaning EPC addresses
+if (clean_addresses_epc == 1) {
+  # Construct file path and read in the EPC data
+  epc_file_path <- sprintf("cleaned/epc_addresses_%d.csv", length(list.files("cleaned/epcs", full.names = TRUE)))
+  epcs <- read_csv(epc_file_path, show_col_types = FALSE)
+  # Clean and correct the address data within the dataframe
+  epcs_corrected <- correct_address(epcs)
+  # Write the cleaned data to a new file
+  write_csv(epcs_corrected, sprintf("cleaned/epc_addresses_%dc.csv", length(list.files("cleaned/epcs", full.names = TRUE)) - 1))
+}
+
+# Check if 'match_addresses' flag is set to proceed with merging address datasets
+if (match_addresses == 1) {
+  # Read in registry and EPC data, cleaning addresses in the process
+  reg_file_path <- sprintf("cleaned/reg_addresses_%s.csv", registry_files)
+  reg_addresses <- read_csv(reg_file_path, show_col_types = FALSE) %>% correct_address()
+  epc_addresses <- read_csv("cleaned/epc_addresses_345.csv", show_col_types = FALSE) %>% correct_address()
+
+  # Check if we are in read-only mode, which would skip writing the merge result to a file.
+  # The 'read_only' flag should be defined elsewhere in the script.
+  merges_count <- 0
+  result1 <- perform_merge(registry_addresses, epc_addresses, c("PRIMARY", "SECONDARY", "STREET", "POSTCODE"), 
+                           if (!read_only) file.path(output_directory, "merged_addresses") else NULL)
+
+  # ... (potential additional merge operations)
+
+  if (!read_only) {
+    print("Merge operations completed") 
+  }
 }
